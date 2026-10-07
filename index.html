@@ -224,7 +224,7 @@
     incomeEntry: { amount:"", note:"", date: todayISO() },
     carryover: null,
     changesSinceBackup: 0,
-    showOpenImportBanner: true,
+    lastBackupPromptAt: null,
     syncStatus: "connecting"
   };
 
@@ -240,6 +240,7 @@
   };
   var SYNC_KEY = "kassenbuch_sync_code";
   var fbDb = null, fbReady = false, cloudUnsub = null;
+  var cloudSyncEstablished = false; // erst true, nachdem wir wirklich wissen, was in der Cloud steht
 
   function todayISO(){ var d = new Date(); return d.getFullYear() + "-" + pad(d.getMonth()+1) + "-" + pad(d.getDate()); }
   function pad(n){ return n < 10 ? "0"+n : ""+n; }
@@ -321,19 +322,45 @@
   function cloudDocRef(code){
     return fbDb.collection("kassenbuecher").doc(code);
   }
-  function cloudPush(data){
+  function looksEmptyPayload(data){
+    var c = (data && data.config) || {};
+    var hasIncomes = c.incomes && c.incomes.length;
+    var hasFixcosts = c.fixcosts && c.fixcosts.length;
+    var hasExpenses = data && data.expenses && data.expenses.length;
+    return !hasIncomes && !hasFixcosts && !hasExpenses;
+  }
+  function cloudPush(data, opts){
     if(!fbReady) return;
     var code = getSyncCode();
     if(!code) return;
+    // Sicherheitsnetz 1: Solange wir den aktuellen Cloud-Stand noch nicht kennen (erste
+    // Sekunde nach dem Öffnen), schreiben wir nichts – sonst könnte ein zu früh
+    // auftretendes Schließen/Wegwischen einen leeren Zwischenstand hochladen.
+    if(!cloudSyncEstablished) return;
+    // Sicherheitsnetz 2: Ein leer aussehendes Datenpaket wird nie hochgeladen, außer es ist
+    // ausdrücklich als Erstanlage eines neuen, noch unbenutzten Sync-Codes markiert.
+    if(looksEmptyPayload(data) && !(opts && opts.allowEmpty)){
+      console.warn("Kassenbuch: leeres Datenpaket wurde NICHT in die Cloud geschrieben (Schutz vor Datenverlust).");
+      return;
+    }
     cloudDocRef(code).set(data).catch(function(){ setSyncStatus("offline"); });
   }
   function applyRemoteData(remote){
     var normalized = normalizeLoaded(remote);
+    var localHasContent = (state.config.incomes||[]).length || (state.config.fixcosts||[]).length || (state.allExpenses||[]).length;
+    if(looksEmptyPayload(normalized) && localHasContent){
+      // Cloud-Stand sieht leer aus, aber dieses Gerät hat noch echte Daten im Speicher ->
+      // nicht blind überschreiben, sondern den eigenen (vermutlich korrekten) Stand zurückschreiben.
+      console.warn("Kassenbuch: leerer Cloud-Stand ignoriert, lokale Daten stattdessen zurückgeschrieben.");
+      cloudPush(loadAll());
+      return;
+    }
     try{ localStorage.setItem(LS_KEY, JSON.stringify(normalized)); }catch(e){}
     idbSet(LS_KEY, normalized);
     state.config = normalized.config;
     state.allExpenses = normalized.expenses;
     state.changesSinceBackup = normalized.meta.changesSinceBackup || 0;
+    state.lastBackupPromptAt = normalized.meta.lastBackupPromptAt || null;
     applyMonthFilter();
     refreshCarryover();
     render();
@@ -347,7 +374,14 @@
     cloudUnsub = cloudDocRef(code).onSnapshot(function(snap){
       setSyncStatus("online");
       if(snap.metadata.hasPendingWrites) return; // eigener Schreibvorgang, nicht erneut anwenden
-      if(!snap.exists){ cloudPush(loadAll()); return; }
+      if(!snap.exists){
+        // Dieser Sync-Code hat wirklich noch nie Daten in der Cloud gehabt -> jetzt (und nur jetzt)
+        // dürfen wir den aktuellen lokalen Stand als Erstanlage hochladen, auch falls leer.
+        cloudSyncEstablished = true;
+        cloudPush(loadAll(), { allowEmpty: true });
+        return;
+      }
+      cloudSyncEstablished = true;
       applyRemoteData(snap.data());
     }, function(){ setSyncStatus("offline"); });
   }
@@ -370,7 +404,7 @@
     return {
       config: Object.assign({ incomes:[], fixcosts:[], autoCarryover:false }, (d&&d.config)||{}),
       expenses: (d&&d.expenses) || [],
-      meta: Object.assign({ changesSinceBackup:0, lastBackupAt:null }, (d&&d.meta)||{})
+      meta: Object.assign({ changesSinceBackup:0, lastBackupAt:null, lastBackupPromptAt:null }, (d&&d.meta)||{})
     };
   }
   function loadAll(){
@@ -427,6 +461,7 @@
     state.config = data.config;
     state.allExpenses = data.expenses;
     state.changesSinceBackup = data.meta.changesSinceBackup || 0;
+    state.lastBackupPromptAt = data.meta.lastBackupPromptAt || null;
     applyMonthFilter();
     refreshCarryover();
   }
@@ -556,29 +591,26 @@
   }
 
   // ---------- rendering ----------
-  var BACKUP_NUDGE_THRESHOLD = 1;
+  var BACKUP_NUDGE_DAYS = 7; // höchstens einmal pro Woche nachfragen
 
   function renderBackupBanner(){
-    if((state.changesSinceBackup||0) < BACKUP_NUDGE_THRESHOLD) return "";
+    if((state.changesSinceBackup||0) < 1) return "";
+    var last = state.lastBackupPromptAt ? new Date(state.lastBackupPromptAt) : null;
+    if(last){
+      var daysSince = (Date.now() - last.getTime()) / 86400000;
+      if(daysSince < BACKUP_NUDGE_DAYS) return "";
+    }
     return '<div class="backup-banner">'
-      + '<span>💾 ' + state.changesSinceBackup + ' neue Änderung' + (state.changesSinceBackup===1?"":"en") + ' seit dem letzten Backup.</span>'
-      + '<button id="bannerBackup">Jetzt sichern</button>'
-      + '</div>';
-  }
-
-  function renderOpenImportBanner(){
-    if(!state.showOpenImportBanner) return "";
-    return '<div class="backup-banner import">'
-      + '<span>📥 Neu geöffnet – zur Sicherheit letztes Backup einspielen?</span>'
+      + '<span>💾 Lust auf ein frisches Backup? (Zusätzlich zur Cloud-Synchronisierung)</span>'
       + '<div style="display:flex;gap:6px;flex-shrink:0;">'
-      + '<button id="bannerImportDismiss" class="ghost">Nicht jetzt</button>'
-      + '<button id="bannerImport">Importieren</button>'
+      + '<button id="bannerBackupLater" class="ghost">Später</button>'
+      + '<button id="bannerBackup">Jetzt sichern</button>'
       + '</div></div>';
   }
 
   function render(){
     var main = document.getElementById("main");
-    var banner = renderOpenImportBanner() + renderBackupBanner();
+    var banner = renderBackupBanner();
     if(state.tab === "uebersicht") main.innerHTML = banner + renderUebersicht();
     else if(state.tab === "erfassen") main.innerHTML = banner + renderErfassen();
     else if(state.tab === "verlauf") main.innerHTML = banner + renderVerlauf();
@@ -589,10 +621,16 @@
     });
     var bb = document.getElementById("bannerBackup");
     if(bb) bb.onclick = exportBackup;
-    var bi = document.getElementById("bannerImport");
-    if(bi) bi.onclick = function(){ document.getElementById("restoreFileInput").click(); };
-    var bd = document.getElementById("bannerImportDismiss");
-    if(bd) bd.onclick = function(){ state.showOpenImportBanner = false; render(); };
+    var bbl = document.getElementById("bannerBackupLater");
+    if(bbl) bbl.onclick = function(){
+      var all = loadAll();
+      all.meta.lastBackupPromptAt = new Date().toISOString();
+      state.lastBackupPromptAt = all.meta.lastBackupPromptAt;
+      try{ localStorage.setItem(LS_KEY, JSON.stringify(all)); }catch(e){}
+      idbSet(LS_KEY, all);
+      cloudPush(all);
+      render();
+    };
     bindTabContent();
   }
 
@@ -1153,11 +1191,13 @@
     var stamp = todayISO();
     triggerDownload("kassenbuch_backup_" + stamp + ".json", "application/json", json);
     toast("Backup wird heruntergeladen.");
-    data.meta = { changesSinceBackup: 0, lastBackupAt: new Date().toISOString() };
+    var now = new Date().toISOString();
+    data.meta = { changesSinceBackup: 0, lastBackupAt: now, lastBackupPromptAt: now };
     try{ localStorage.setItem(LS_KEY, JSON.stringify(data)); }catch(e){}
     idbSet(LS_KEY, data);
     cloudPush(data);
     state.changesSinceBackup = 0;
+    state.lastBackupPromptAt = now;
     render();
   }
 
@@ -1187,7 +1227,8 @@
     overlay.querySelector("#ciOk").onclick = function(){
       overlay.remove();
       var cfg = Object.assign({ incomes:[], fixcosts:[], autoCarryover:false }, parsed.config||{});
-      var data = { config: cfg, expenses: parsed.expenses || [], meta: { changesSinceBackup: 0, lastBackupAt: new Date().toISOString() } };
+      var nowIso = new Date().toISOString();
+      var data = { config: cfg, expenses: parsed.expenses || [], meta: { changesSinceBackup: 0, lastBackupAt: nowIso, lastBackupPromptAt: nowIso } };
       try{
         localStorage.setItem(LS_KEY, JSON.stringify(data));
         idbSet(LS_KEY, data);
@@ -1195,10 +1236,10 @@
         state.config = data.config;
         state.allExpenses = data.expenses;
         state.changesSinceBackup = 0;
+        state.lastBackupPromptAt = nowIso;
         applyMonthFilter();
         refreshCarryover();
         toast("Backup importiert.");
-        state.showOpenImportBanner = false;
         state.tab = "uebersicht";
         render();
       }catch(e){ toast("Speichern fehlgeschlagen (Speicher evtl. voll)."); }
