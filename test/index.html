@@ -611,61 +611,75 @@
     return { income:income, fix:fix, pausedFixSum:pausedFixSum, extraIncome:extraIncome, carry:carry, baseline:baseline, spent:spent, remaining:remaining, daysLeft:daysLeft, daily:daily, isCurrentMonth:isCurrentMonth };
   }
 
-  // Liquidität bis zur nächsten Einnahme: wie viel ist WIRKLICH schon da (nicht erst
-  // gedanklich für den ganzen Monat eingerechnet), bis das nächste Gehalt/Kindergeld kommt.
-  // Nur relevant für den aktuell laufenden Monat und nur wenn mind. eine Einnahme einen
-  // Zahltag hat - sonst lässt sich "als nächstes fällig" nicht bestimmen.
+  // Liquidität bis zur nächsten Einnahme: wie viel Geld ist jetzt wirklich da und reicht
+  // bis zur nächsten Gutschrift. Gerechnet wird wie ein Kontostand seit Monatsbeginn:
+  // bisher eingegangene Einnahmen + Übertrag + Zusatzeinnahmen
+  // - ALLE Fixkosten, die bis dahin fällig sind (auch die schon abgebuchten!)
+  // - bisherige Ausgaben.
+  // Einnahmen mit "Monatsende des Vormonats" gelten für den laufenden Monat als schon da,
+  // ihre nächste Gutschrift (am Monatsende) ist aber trotzdem der nächste Zahltag.
   function nextIncomeLiquidity(){
     var t = totals();
     if(!t.isCurrentMonth) return null;
-    // Einnahmen, die schon am Monatsletzten des Vormonats ankommen, haben in diesem Monat
-    // keinen "nächsten Termin" mehr - sie sind ja längst da. Nur echte, noch kommende
-    // Zahltage zählen als Kandidat für "nächste Einnahme".
-    var incomesWithDay = state.config.incomes.filter(function(i){ return i.payDay && !i.payPreviousMonthEnd; });
-    if(incomesWithDay.length === 0) return null;
 
     var now = new Date();
-    var today = now.getDate();
-    var daysInMonth = new Date(state.viewYear, state.viewMonth+1, 0).getDate();
+    var y = now.getFullYear(), m = now.getMonth(), today = now.getDate();
+    var todayMid = new Date(y, m, today);
+    function lastDayOf(yy, mm){ return new Date(yy, mm + 1, 0).getDate(); }
+    // Tag der Gutschrift im Monat mm (0 = unbekannt). Ohne Tag gilt bei Monatsende-Einnahmen der letzte Tag.
+    function arrivalDay(i, yy, mm){
+      var d = i.payDay || (i.payPreviousMonthEnd ? 31 : 0);
+      return d ? Math.min(d, lastDayOf(yy, mm)) : 0;
+    }
 
-    // Für jede Einnahme mit Zahltag den nächsten Termin bestimmen (heute fällig = schon da,
-    // also zählt der nächste Termin erst ab morgen).
-    var candidates = incomesWithDay.map(function(i){
-      var daysUntil = i.payDay > today ? (i.payDay - today) : (daysInMonth - today + i.payDay);
-      return { income: i, daysUntil: daysUntil };
+    var receivedIncome = 0;
+    var candidates = [];
+    state.config.incomes.forEach(function(i){
+      var amt = Number(i.amount) || 0;
+      var ad = arrivalDay(i, y, m);
+      if(i.payPreviousMonthEnd){
+        receivedIncome += amt;                       // kam schon am Vormonatsende an
+        if(ad && ad <= today) receivedIncome += amt; // Gutschrift dieses Monatsendes ist auch schon da
+      } else if(!i.payDay){
+        receivedIncome += amt;                       // ohne Tag: zählt wie bisher als verfügbar
+      } else if(ad <= today){
+        receivedIncome += amt;
+      }
+      if(ad){
+        var nextDate = ad > today ? new Date(y, m, ad) : new Date(y, m + 1, arrivalDay(i, y, m + 1));
+        candidates.push({ income: i, date: nextDate, daysUntil: Math.round((nextDate - todayMid) / 86400000) });
+      }
     });
-    candidates.sort(function(a,b){ return a.daysUntil - b.daysUntil; });
+    if(candidates.length === 0) return null;
+    candidates.sort(function(a, b){ return a.daysUntil - b.daysUntil; });
     var next = candidates[0];
 
-    // Schon sicher eingegangen: Einnahmen mit Zahltag <= heute, plus Einnahmen ganz ohne
-    // Zahltag (dafür gibt's keinen Fälligkeits-Status, die gelten wie bisher als verfügbar).
-    var receivedIncome = state.config.incomes.reduce(function(s,i){
-      if(i.payPreviousMonthEnd) return s + (Number(i.amount)||0);
-      if(!i.payDay) return s + (Number(i.amount)||0);
-      return s + (i.payDay <= today ? (Number(i.amount)||0) : 0);
-    }, 0);
-
-    // Noch bevorstehende aktive Fixkosten bis zum nächsten Zahltag (inkl. heute, falls noch
-    // nicht abgebucht). Fixkosten ohne Fälligkeitstag werden vorsichtshalber komplett als
-    // "steht noch aus" gerechnet, damit nichts optimistischer wirkt, als es ist.
-    var activeFix = state.config.fixcosts.filter(isFixActive);
-    var upcomingFix = activeFix.reduce(function(s,i){
-      if(!i.dueDay) return s + monthlyEquivalent(i);
-      if(i.cycle !== "monthly"){
-        if(i.dueMonth == null || i.dueMonth !== state.viewMonth) return s; // nicht dieser Monat
+    // Fixkosten, die bis zum nächsten Zahltag (ausschließlich) fällig werden - seit Monatsbeginn.
+    // Fällt der Zahltag in den Folgemonat, zählt der aktuelle Monat komplett plus die Posten des
+    // Folgemonats, die vor dem Zahltag fällig sind. Ohne Fälligkeitstag: einmal pro Monat, vorsichtshalber.
+    var D = next.date, dDay = D.getDate();
+    var dInThisMonth = D.getFullYear() === y && D.getMonth() === m;
+    var fixBefore = state.config.fixcosts.filter(isFixActive).reduce(function(s, i){
+      var me = monthlyEquivalent(i);
+      if(!i.dueDay) return s + me;
+      var sum = 0;
+      if(dInThisMonth){
+        if(Math.min(i.dueDay, lastDayOf(y, m)) < dDay) sum += me;
+      } else {
+        sum += me;
+        if(Math.min(i.dueDay, lastDayOf(y, m + 1)) < dDay) sum += me;
       }
-      return s + (i.dueDay >= today ? monthlyEquivalent(i) : 0);
+      return s + sum;
     }, 0);
 
-    var available = receivedIncome + t.carry + t.extraIncome - upcomingFix - t.spent;
-    var daily = next.daysUntil > 0 ? available / next.daysUntil : available;
-    var nextDateObj = new Date(state.viewYear, state.viewMonth, today + next.daysUntil);
+    var available = receivedIncome + t.carry + t.extraIncome - fixBefore - t.spent;
+    var daily = available / next.daysUntil;
 
     return {
       available: available,
       daily: daily,
       daysUntil: next.daysUntil,
-      nextIncome: { name: next.income.name, amount: Number(next.income.amount)||0, payDay: next.income.payDay, dateLabel: pad(nextDateObj.getDate()) + "." + pad(nextDateObj.getMonth()+1) + "." }
+      nextIncome: { name: next.income.name, amount: Number(next.income.amount) || 0, payDay: next.income.payDay, dateLabel: pad(D.getDate()) + "." + pad(D.getMonth() + 1) + "." }
     };
   }
 
@@ -904,7 +918,7 @@
     html += '<h2>Monatliche Einnahmen</h2>';
     sortedByDay(state.config.incomes, "payDay").forEach(function(i){
       var subParts = [];
-      if(i.payPreviousMonthEnd) subParts.push("am Monatsletzten des Vormonats");
+      if(i.payPreviousMonthEnd) subParts.push("Gutschrift zum Monatsende" + (i.payDay ? " (am " + i.payDay + ".)" : ""));
       else if(i.payDay) subParts.push("am " + i.payDay + ".");
       var status = incomeDueStatus(i, state.viewYear, state.viewMonth);
       var badge = "";
@@ -913,7 +927,7 @@
       html += '<div class="list-item"><div class="meta"><div class="name">' + escapeHTML(i.name) + badge + '</div>' + (subParts.length ? '<div class="sub">' + subParts.join(" · ") + '</div>' : '') + '</div><div class="right"><span class="amt">' + fmtEUR(i.amount) + '</span><button class="edit-btn" data-edit-income="' + i.id + '">✎</button><button class="del" data-del-income="' + i.id + '">×</button></div></div>';
     });
     html += '<div class="add-form"><input id="newIncomeName" placeholder="z. B. Ausbildungsvergütung" style="flex-basis:100%;"><input id="newIncomeAmount" class="small" type="number" inputmode="decimal" step="0.01" placeholder="€"><input id="newIncomeDay" class="small" type="number" min="1" max="31" placeholder="Tag (opt.)"><button class="add-btn" id="addIncome">+</button></div>';
-    html += '<label class="checkbox-row"><input type="checkbox" id="newIncomePrevMonth"> Kommt schon am Monatsletzten des Vormonats an – zählt ab Monatsbeginn als eingegangen</label>';
+    html += '<label class="checkbox-row"><input type="checkbox" id="newIncomePrevMonth"> Kommt schon zum Monatsende des Vormonats an – zählt ab Monatsbeginn als eingegangen. Bei „Tag“ den Tag der nächsten Gutschrift eintragen (z. B. 30), sonst gilt der letzte Tag des Monats.</label>';
     html += '</section>';
 
     html += '<section class="block">';
@@ -1248,7 +1262,7 @@
     var fields = '<div class="field"><label>Name</label><input id="eiName" value="' + escapeHTML(item.name) + '"></div>'
       + '<div class="row2"><div class="field"><label>Betrag (€)</label><input id="eiAmount" type="number" inputmode="decimal" step="0.01" value="' + item.amount + '"></div>'
       + '<div class="field"><label>Tag (opt.)</label><input id="eiDay" type="number" min="1" max="31" value="' + (item.payDay||"") + '"></div></div>'
-      + '<label class="checkbox-row"><input type="checkbox" id="eiPrevMonth"' + (item.payPreviousMonthEnd?" checked":"") + '> Kommt schon am Monatsletzten des Vormonats an – zählt ab Monatsbeginn als eingegangen</label>';
+      + '<label class="checkbox-row"><input type="checkbox" id="eiPrevMonth"' + (item.payPreviousMonthEnd?" checked":"") + '> Kommt schon zum Monatsende des Vormonats an – zählt ab Monatsbeginn als eingegangen. Bei „Tag“ den Tag der nächsten Gutschrift eintragen (z. B. 30), sonst gilt der letzte Tag des Monats.</label>';
     openEditSheet("Einnahme bearbeiten", fields, function(close){
       var n = document.getElementById("eiName").value.trim();
       var a = parseFloat((document.getElementById("eiAmount").value||"").replace(",","."));
