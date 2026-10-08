@@ -17,6 +17,15 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+<script>
+  // Designauswahl ist eine lokale Geräteeinstellung, kein Teil der Cloud-Daten.
+  try {
+    var savedTheme = localStorage.getItem("ledger_theme") || "system";
+    if(savedTheme === "light" || savedTheme === "dark") {
+      document.documentElement.setAttribute("data-theme", savedTheme);
+    }
+  } catch(e) { /* Bei gesperrtem Speicher gilt die Systemeinstellung. */ }
+</script>
 <style>
   :root{
     --paper:#F2F6F1;
@@ -45,6 +54,33 @@
     --surface:#1E2E28; --line:#2C3E37; --accent:#D9A857; --accent-soft:#33301E;
     --bad:#D98177; --bad-soft:#3A2321;
   }
+  #themeSelect {
+    background:var(--surface);
+    color:var(--ink);
+    border:1px solid var(--line);
+    border-radius:var(--radius);
+    padding:8px 10px;
+    min-width:140px;
+    max-width:100%;
+  }
+  #themeSelect option { background:var(--surface); color:var(--ink); }
+  /* Einheitlich lesbare Eingabefelder in beiden Farbmodi */
+  :root { color-scheme: light; }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) { color-scheme: dark; }
+  }
+  :root[data-theme="dark"] { color-scheme: dark; }
+  input:not([type="checkbox"]):not([type="radio"]):not([type="file"]),
+  select, textarea {
+    background-color:var(--surface);
+    color:var(--ink);
+    border:1px solid var(--line);
+  }
+  input::placeholder, textarea::placeholder {
+    color:var(--ink-soft);
+    opacity:1;
+  }
+  select option { background-color:var(--surface); color:var(--ink); }
   *{box-sizing:border-box;}
   html,body{margin:0;padding:0;}
   body{ background:var(--paper-outer); color:var(--ink); font-family:var(--font-body); font-size:15px; line-height:1.5; min-height:100vh; -webkit-font-smoothing:antialiased; }
@@ -139,7 +175,6 @@
   .switch input:checked + .track::before{ transform:translateX(14px); }
 
   .add-form{ display:flex; flex-wrap:wrap; gap:8px; margin-top:10px; }
-  .checkbox-row{ display:flex; align-items:center; gap:6px; font-size:12px; color:var(--ink-soft); margin-top:6px; }
   .add-form input, .add-form select{ flex:1; min-width:0; }
   .add-form input.small{ flex:0 0 74px; }
   .add-form select.cycle{ flex:0 0 104px; }
@@ -161,12 +196,6 @@
   nav.tabbar button.active svg{ stroke:var(--accent); }
 
   .hint{ font-size:12px; color:var(--ink-soft); margin-top:8px; }
-  .liquidity-box{ background:var(--surface); border:1px solid var(--line); border-radius:var(--radius); padding:14px; margin-top:14px; }
-  .liquidity-label{ font-size:12.5px; color:var(--ink-soft); }
-  .liquidity-amount{ font-family:var(--font-display); font-size:28px; margin-top:2px; }
-  .liquidity-amount.bad{ color:var(--bad); }
-  .liquidity-sub{ font-size:12.5px; color:var(--ink-soft); margin-top:4px; }
-  .liquidity-next{ font-size:12.5px; color:var(--ink); margin-top:8px; padding-top:8px; border-top:1px solid var(--line); }
   .reserve-box{ background:var(--accent-soft); border-radius:var(--radius); padding:14px; margin-top:14px; }
   .reserve-title{ font-size:13px; color:var(--ink); font-weight:500; margin-bottom:6px; }
   .reserve-total{ font-family:'Fraunces',serif; font-size:26px; color:var(--ink); line-height:1.2; }
@@ -542,13 +571,10 @@
     return now.getDate() >= i.dueDay ? "paid" : "pending";
   }
   function incomeDueStatus(i, y, m){
+    if(!i.payDay) return null;
     var now = new Date();
     var isCurrent = now.getFullYear() === y && now.getMonth() === m;
     if(!isCurrent) return null;
-    // Kommt schon am Monatsletzten des Vormonats an -> ab dem 1. dieses Monats
-    // immer schon "eingegangen", unabhängig vom eingetragenen Tag.
-    if(i.payPreviousMonthEnd) return "paid";
-    if(!i.payDay) return null;
     return now.getDate() >= i.payDay ? "paid" : "pending";
   }
   function isFutureMonth(){
@@ -573,64 +599,6 @@
     var daysLeft = isCurrentMonth ? (daysInMonth - now.getDate() + 1) : (isFutureMonth() ? daysInMonth : 0);
     var daily = daysLeft > 0 ? remaining / daysLeft : remaining;
     return { income:income, fix:fix, pausedFixSum:pausedFixSum, extraIncome:extraIncome, carry:carry, baseline:baseline, spent:spent, remaining:remaining, daysLeft:daysLeft, daily:daily, isCurrentMonth:isCurrentMonth };
-  }
-
-  // Liquidität bis zur nächsten Einnahme: wie viel ist WIRKLICH schon da (nicht erst
-  // gedanklich für den ganzen Monat eingerechnet), bis das nächste Gehalt/Kindergeld kommt.
-  // Nur relevant für den aktuell laufenden Monat und nur wenn mind. eine Einnahme einen
-  // Zahltag hat - sonst lässt sich "als nächstes fällig" nicht bestimmen.
-  function nextIncomeLiquidity(){
-    var t = totals();
-    if(!t.isCurrentMonth) return null;
-    // Einnahmen, die schon am Monatsletzten des Vormonats ankommen, haben in diesem Monat
-    // keinen "nächsten Termin" mehr - sie sind ja längst da. Nur echte, noch kommende
-    // Zahltage zählen als Kandidat für "nächste Einnahme".
-    var incomesWithDay = state.config.incomes.filter(function(i){ return i.payDay && !i.payPreviousMonthEnd; });
-    if(incomesWithDay.length === 0) return null;
-
-    var now = new Date();
-    var today = now.getDate();
-    var daysInMonth = new Date(state.viewYear, state.viewMonth+1, 0).getDate();
-
-    // Für jede Einnahme mit Zahltag den nächsten Termin bestimmen (heute fällig = schon da,
-    // also zählt der nächste Termin erst ab morgen).
-    var candidates = incomesWithDay.map(function(i){
-      var daysUntil = i.payDay > today ? (i.payDay - today) : (daysInMonth - today + i.payDay);
-      return { income: i, daysUntil: daysUntil };
-    });
-    candidates.sort(function(a,b){ return a.daysUntil - b.daysUntil; });
-    var next = candidates[0];
-
-    // Schon sicher eingegangen: Einnahmen mit Zahltag <= heute, plus Einnahmen ganz ohne
-    // Zahltag (dafür gibt's keinen Fälligkeits-Status, die gelten wie bisher als verfügbar).
-    var receivedIncome = state.config.incomes.reduce(function(s,i){
-      if(i.payPreviousMonthEnd) return s + (Number(i.amount)||0);
-      if(!i.payDay) return s + (Number(i.amount)||0);
-      return s + (i.payDay <= today ? (Number(i.amount)||0) : 0);
-    }, 0);
-
-    // Noch bevorstehende aktive Fixkosten bis zum nächsten Zahltag (inkl. heute, falls noch
-    // nicht abgebucht). Fixkosten ohne Fälligkeitstag werden vorsichtshalber komplett als
-    // "steht noch aus" gerechnet, damit nichts optimistischer wirkt, als es ist.
-    var activeFix = state.config.fixcosts.filter(isFixActive);
-    var upcomingFix = activeFix.reduce(function(s,i){
-      if(!i.dueDay) return s + monthlyEquivalent(i);
-      if(i.cycle !== "monthly"){
-        if(i.dueMonth == null || i.dueMonth !== state.viewMonth) return s; // nicht dieser Monat
-      }
-      return s + (i.dueDay >= today ? monthlyEquivalent(i) : 0);
-    }, 0);
-
-    var available = receivedIncome + t.carry + t.extraIncome - upcomingFix - t.spent;
-    var daily = next.daysUntil > 0 ? available / next.daysUntil : available;
-    var nextDateObj = new Date(state.viewYear, state.viewMonth, today + next.daysUntil);
-
-    return {
-      available: available,
-      daily: daily,
-      daysUntil: next.daysUntil,
-      nextIncome: { name: next.income.name, amount: Number(next.income.amount)||0, payDay: next.income.payDay, dateLabel: pad(nextDateObj.getDate()) + "." + pad(nextDateObj.getMonth()+1) + "." }
-    };
   }
 
   function refreshCarryover(){
@@ -714,16 +682,6 @@
     html += '<div class="amount ' + (over ? "bad" : "") + '">' + fmtEUR(t.remaining) + '</div>';
     html += '<div class="sub">' + (hasSetup ? (t.daysLeft > 0 ? t.daysLeft + " Tage übrig in diesem Monat" : "Monat abgeschlossen") : "Hinterlege zuerst deine Einnahmen und Fixkosten unter Einstellungen") + '</div>';
     html += '</div>';
-
-    var nl = hasSetup ? nextIncomeLiquidity() : null;
-    if(nl){
-      html += '<div class="liquidity-box">';
-      html += '<div class="liquidity-label">Bis zur nächsten Einnahme verfügbar</div>';
-      html += '<div class="liquidity-amount ' + (nl.available < 0 ? "bad" : "") + '">' + fmtEUR(nl.available) + '</div>';
-      html += '<div class="liquidity-sub">Sicheres Tagesbudget bis dahin: ' + fmtEUR(nl.daily) + '</div>';
-      html += '<div class="liquidity-next">Nächste Einnahme: ' + escapeHTML(nl.nextIncome.name) + ', +' + fmtEUR(nl.nextIncome.amount) + ' am ' + nl.nextIncome.dateLabel + ' (in ' + nl.daysUntil + ' Tag' + (nl.daysUntil===1?'':'en') + ')</div>';
-      html += '</div>';
-    }
 
     if(hasSetup){
       html += '<div class="bar-row">';
@@ -868,8 +826,7 @@
     html += '<h2>Monatliche Einnahmen</h2>';
     sortedByDay(state.config.incomes, "payDay").forEach(function(i){
       var subParts = [];
-      if(i.payPreviousMonthEnd) subParts.push("am Monatsletzten des Vormonats");
-      else if(i.payDay) subParts.push("am " + i.payDay + ".");
+      if(i.payDay) subParts.push("am " + i.payDay + ".");
       var status = incomeDueStatus(i, state.viewYear, state.viewMonth);
       var badge = "";
       if(status === "paid") badge = '<span class="due-badge paid">eingegangen</span>';
@@ -877,7 +834,6 @@
       html += '<div class="list-item"><div class="meta"><div class="name">' + escapeHTML(i.name) + badge + '</div>' + (subParts.length ? '<div class="sub">' + subParts.join(" · ") + '</div>' : '') + '</div><div class="right"><span class="amt">' + fmtEUR(i.amount) + '</span><button class="edit-btn" data-edit-income="' + i.id + '">✎</button><button class="del" data-del-income="' + i.id + '">×</button></div></div>';
     });
     html += '<div class="add-form"><input id="newIncomeName" placeholder="z. B. Ausbildungsvergütung" style="flex-basis:100%;"><input id="newIncomeAmount" class="small" type="number" inputmode="decimal" step="0.01" placeholder="€"><input id="newIncomeDay" class="small" type="number" min="1" max="31" placeholder="Tag (opt.)"><button class="add-btn" id="addIncome">+</button></div>';
-    html += '<label class="checkbox-row"><input type="checkbox" id="newIncomePrevMonth"> Kommt schon am Monatsletzten des Vormonats an – zählt ab Monatsbeginn als eingegangen</label>';
     html += '</section>';
 
     html += '<section class="block">';
@@ -960,6 +916,17 @@
     html += '</div>';
     html += '<button class="btn secondary" id="exportAllCsv">Alle Buchungen als CSV exportieren</button>';
     html += '</section>';
+
+    html += '<section class="block">';
+    html += '<h2>Darstellung</h2>';
+    html += '<div class="field"><label for="themeSelect">Farbschema</label>';
+    html += '<select id="themeSelect">';
+    html += '<option value="system">System</option>';
+    html += '<option value="light">Hell</option>';
+    html += '<option value="dark">Dunkel</option>';
+    html += '</select></div>';
+    html += '<div class="hint">Die Auswahl gilt nur auf diesem Gerät.</div>';
+    html += '</section>';
     return html;
   }
 
@@ -1007,6 +974,19 @@
     }
 
     if(state.tab === "einstellungen"){
+      var themeSelect = document.getElementById("themeSelect");
+      if(themeSelect){
+        var currentTheme = "system";
+        try { currentTheme = localStorage.getItem("ledger_theme") || "system"; } catch(e) {}
+        if(["system", "light", "dark"].indexOf(currentTheme) === -1) currentTheme = "system";
+        themeSelect.value = currentTheme;
+        themeSelect.onchange = function(){
+          var choice = themeSelect.value;
+          if(choice === "system") document.documentElement.removeAttribute("data-theme");
+          else document.documentElement.setAttribute("data-theme", choice);
+          try { localStorage.setItem("ledger_theme", choice); } catch(e) {}
+        };
+      }
       var addInc = document.getElementById("addIncome");
       if(addInc) addInc.onclick = function(){
         var n = document.getElementById("newIncomeName").value.trim();
@@ -1014,9 +994,8 @@
         if(!n || !isFinite(a)) { toast("Bitte Name und Betrag angeben."); return; }
         var dayRaw = document.getElementById("newIncomeDay").value;
         var payDay = dayRaw ? Math.min(31, Math.max(1, parseInt(dayRaw,10))) : null;
-        var prevMonthEnd = document.getElementById("newIncomePrevMonth").checked;
         var cfg = clone(state.config);
-        cfg.incomes.push({ id:newId("inc"), name:n, amount:a, payDay:payDay, payPreviousMonthEnd:prevMonthEnd });
+        cfg.incomes.push({ id:newId("inc"), name:n, amount:a, payDay:payDay });
         saveConfig(cfg);
       };
       var addFx = document.getElementById("addFix");
@@ -1187,18 +1166,16 @@
   function editIncomeItem(item){
     var fields = '<div class="field"><label>Name</label><input id="eiName" value="' + escapeHTML(item.name) + '"></div>'
       + '<div class="row2"><div class="field"><label>Betrag (€)</label><input id="eiAmount" type="number" inputmode="decimal" step="0.01" value="' + item.amount + '"></div>'
-      + '<div class="field"><label>Tag (opt.)</label><input id="eiDay" type="number" min="1" max="31" value="' + (item.payDay||"") + '"></div></div>'
-      + '<label class="checkbox-row"><input type="checkbox" id="eiPrevMonth"' + (item.payPreviousMonthEnd?" checked":"") + '> Kommt schon am Monatsletzten des Vormonats an – zählt ab Monatsbeginn als eingegangen</label>';
+      + '<div class="field"><label>Tag (opt.)</label><input id="eiDay" type="number" min="1" max="31" value="' + (item.payDay||"") + '"></div></div>';
     openEditSheet("Einnahme bearbeiten", fields, function(close){
       var n = document.getElementById("eiName").value.trim();
       var a = parseFloat((document.getElementById("eiAmount").value||"").replace(",","."));
       if(!n || !isFinite(a)){ toast("Bitte Name und Betrag angeben."); return; }
       var dayRaw = document.getElementById("eiDay").value;
       var payDay = dayRaw ? Math.min(31, Math.max(1, parseInt(dayRaw,10))) : null;
-      var prevMonthEnd = document.getElementById("eiPrevMonth").checked;
       var cfg = clone(state.config);
       var target = cfg.incomes.find(function(x){ return x.id === item.id; });
-      if(target){ target.name = n; target.amount = a; target.payDay = payDay; target.payPreviousMonthEnd = prevMonthEnd; }
+      if(target){ target.name = n; target.amount = a; target.payDay = payDay; }
       saveConfig(cfg);
       close();
     });
