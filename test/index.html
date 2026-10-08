@@ -575,7 +575,9 @@
       if(diff !== 0) return "not_this_month";
     }
     if(!isCurrent) return null;
-    return now.getDate() >= i.dueDay ? "paid" : "pending";
+    // Kurze Monate: Tag 29-31 gilt dann am letzten Tag des Monats
+    var dueEff = Math.min(i.dueDay, new Date(y, m + 1, 0).getDate());
+    return now.getDate() >= dueEff ? "paid" : "pending";
   }
   function incomeDueStatus(i, y, m){
     var now = new Date();
@@ -585,7 +587,8 @@
     // immer schon "eingegangen", unabhängig vom eingetragenen Tag.
     if(i.payPreviousMonthEnd) return "paid";
     if(!i.payDay) return null;
-    return now.getDate() >= i.payDay ? "paid" : "pending";
+    var payEff = Math.min(i.payDay, new Date(y, m + 1, 0).getDate());
+    return now.getDate() >= payEff ? "paid" : "pending";
   }
   function isFutureMonth(){
     var now = new Date();
