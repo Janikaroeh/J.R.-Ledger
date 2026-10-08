@@ -17,6 +17,15 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+<script>
+  // Designauswahl ist eine lokale Geräteeinstellung, kein Teil der Cloud-Daten.
+  try {
+    var savedTheme = localStorage.getItem("ledger_theme") || "system";
+    if(savedTheme === "light" || savedTheme === "dark") {
+      document.documentElement.setAttribute("data-theme", savedTheme);
+    }
+  } catch(e) { /* Bei gesperrtem Speicher gilt die Systemeinstellung. */ }
+</script>
 <style>
   :root{
     --paper:#F2F6F1;
@@ -45,6 +54,33 @@
     --surface:#1E2E28; --line:#2C3E37; --accent:#D9A857; --accent-soft:#33301E;
     --bad:#D98177; --bad-soft:#3A2321;
   }
+  #themeSelect {
+    background:var(--surface);
+    color:var(--ink);
+    border:1px solid var(--line);
+    border-radius:var(--radius);
+    padding:8px 10px;
+    min-width:140px;
+    max-width:100%;
+  }
+  #themeSelect option { background:var(--surface); color:var(--ink); }
+  /* Einheitlich lesbare Eingabefelder in beiden Farbmodi */
+  :root { color-scheme: light; }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) { color-scheme: dark; }
+  }
+  :root[data-theme="dark"] { color-scheme: dark; }
+  input:not([type="checkbox"]):not([type="radio"]):not([type="file"]),
+  select, textarea {
+    background-color:var(--surface);
+    color:var(--ink);
+    border:1px solid var(--line);
+  }
+  input::placeholder, textarea::placeholder {
+    color:var(--ink-soft);
+    opacity:1;
+  }
+  select option { background-color:var(--surface); color:var(--ink); }
   *{box-sizing:border-box;}
   html,body{margin:0;padding:0;}
   body{ background:var(--paper-outer); color:var(--ink); font-family:var(--font-body); font-size:15px; line-height:1.5; min-height:100vh; -webkit-font-smoothing:antialiased; }
@@ -960,6 +996,17 @@
     html += '</div>';
     html += '<button class="btn secondary" id="exportAllCsv">Alle Buchungen als CSV exportieren</button>';
     html += '</section>';
+
+    html += '<section class="block">';
+    html += '<h2>Darstellung</h2>';
+    html += '<div class="field"><label for="themeSelect">Farbschema</label>';
+    html += '<select id="themeSelect">';
+    html += '<option value="system">System</option>';
+    html += '<option value="light">Hell</option>';
+    html += '<option value="dark">Dunkel</option>';
+    html += '</select></div>';
+    html += '<div class="hint">Die Auswahl gilt nur auf diesem Gerät.</div>';
+    html += '</section>';
     return html;
   }
 
@@ -1007,6 +1054,19 @@
     }
 
     if(state.tab === "einstellungen"){
+      var themeSelect = document.getElementById("themeSelect");
+      if(themeSelect){
+        var currentTheme = "system";
+        try { currentTheme = localStorage.getItem("ledger_theme") || "system"; } catch(e) {}
+        if(["system", "light", "dark"].indexOf(currentTheme) === -1) currentTheme = "system";
+        themeSelect.value = currentTheme;
+        themeSelect.onchange = function(){
+          var choice = themeSelect.value;
+          if(choice === "system") document.documentElement.removeAttribute("data-theme");
+          else document.documentElement.setAttribute("data-theme", choice);
+          try { localStorage.setItem("ledger_theme", choice); } catch(e) {}
+        };
+      }
       var addInc = document.getElementById("addIncome");
       if(addInc) addInc.onclick = function(){
         var n = document.getElementById("newIncomeName").value.trim();
